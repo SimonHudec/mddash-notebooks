@@ -1,18 +1,23 @@
 """
 Pipeline progress tracker for MD simulation notebooks.
 
-Provides a combined control + progress widget and writes
-``pipeline-state.json`` for dashboard consumption.
+Provides a single-widget card with an integrated *Run All* button
+and a live step-progress display.  Writes ``pipeline-state.json``
+for external dashboard consumption.
 
-Usage::
+Usage inside a notebook::
 
     from pipeline_tracker import PipelineTracker
 
     tracker = PipelineTracker()
-    tracker.show()          # renders Run All + step list in one card
+    tracker.show()          # one card: button + progress
 
     with tracker.step("topology"):
         gmx.pdb2gmx(...)
+
+Inject into an arbitrary notebook from the command line::
+
+    python pipeline_tracker.py inject notebook.ipynb
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ from pathlib import Path
 from typing import Sequence
 
 import ipywidgets as widgets
-from IPython.display import display, Javascript
+from IPython.display import display
 
 # ──────────────────────────────────────────────────────────────
 # Default step definitions
@@ -45,26 +50,44 @@ _STATE_VERSION = 1
 STATE_FILENAME = "pipeline-state.json"
 
 # ──────────────────────────────────────────────────────────────
-# shadcn/ui-inspired stylesheet
+# JS snippet executed by the Run-All HTML button's onclick.
 #
-# Palette based on Zinc + semantic colors from shadcn defaults.
-# All classes are scoped under .pt-card to avoid notebook conflicts.
+# ipywidgets.HTML sets innerHTML directly (no sanitiser), so
+# inline event-handler attributes work in both JupyterLab and
+# Classic Notebook.  The snippet:
+#   1. Selects the parent cell so "run-all-below" starts here
+#   2. Tries JupyterLab 4 → JupyterLab 3 → Classic Notebook
+#   3. Hides the button immediately
+# ──────────────────────────────────────────────────────────────
+_RUN_ALL_JS = (
+    "var c=this.closest('.jp-Cell,.cell');if(c)c.click();"
+    "var me=this;setTimeout(function(){"
+    "var a=window.jupyterapp||window.jupyterlab;"
+    "if(a&&a.commands){a.commands.execute('notebook:run-all-below');}"
+    "else if(typeof Jupyter!=='undefined'&&Jupyter.notebook)"
+    "{Jupyter.notebook.execute_all_cells_below();}"
+    "me.style.display='none';"
+    "},60)"
+)
+
+# ──────────────────────────────────────────────────────────────
+# Stylesheet – shadcn / zinc palette, scoped via .pt-card
 # ──────────────────────────────────────────────────────────────
 _STYLESHEET = """\
 <style>
 .pt-card {
   --radius: 8px;
   --bg: #fff;
-  --border: #e4e4e7;       /* zinc-200 */
-  --fg: #09090b;           /* zinc-950 */
-  --muted: #71717a;        /* zinc-500 */
-  --muted-bg: #f4f4f5;     /* zinc-100 */
-  --accent: #18181b;       /* zinc-900 */
-  --success: #16a34a;      /* green-600 */
-  --success-bg: #f0fdf4;   /* green-50 */
-  --info: #2563eb;         /* blue-600 */
-  --info-bg: #eff6ff;      /* blue-50 */
-  --destructive: #dc2626;  /* red-600 */
+  --border: #e4e4e7;
+  --fg: #09090b;
+  --muted: #71717a;
+  --muted-bg: #f4f4f5;
+  --accent: #18181b;
+  --success: #16a34a;
+  --success-bg: #f0fdf4;
+  --info: #2563eb;
+  --info-bg: #eff6ff;
+  --destructive: #dc2626;
   --destructive-bg: #fef2f2;
 
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -73,9 +96,24 @@ _STYLESHEET = """\
   border-radius: var(--radius);
   padding: 24px;
   max-width: 540px;
+  overflow: hidden;
+  box-sizing: border-box;
 }
 
-/* header row */
+/* Run All button */
+.pt-btn {
+  width: 100%; padding: 9px 16px;
+  border: none; border-radius: var(--radius);
+  background: var(--accent); color: #fff;
+  font-size: 13px; font-weight: 500;
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  margin-bottom: 16px;
+  font-family: inherit;
+  transition: opacity .15s;
+}
+.pt-btn:hover { opacity: .85; }
+
 .pt-header {
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 16px;
@@ -86,7 +124,6 @@ _STYLESHEET = """\
   border-radius: 999px; padding: 2px 10px; font-weight: 500;
 }
 
-/* progress bar */
 .pt-progress {
   height: 2px; background: var(--muted-bg); border-radius: 1px;
   margin-bottom: 20px; overflow: hidden;
@@ -96,7 +133,6 @@ _STYLESHEET = """\
   transition: width .35s ease;
 }
 
-/* step rows */
 .pt-step { display: flex; align-items: flex-start; min-height: 40px; }
 .pt-step-left {
   display: flex; flex-direction: column; align-items: center;
@@ -116,28 +152,24 @@ _STYLESHEET = """\
 .pt-line-off { background: var(--border); }
 .pt-line-on  { background: var(--success); opacity: .45; }
 
-.pt-step-body { flex: 1; padding-top: 2px; }
-.pt-name {
-  font-size: 13px; font-weight: 500; line-height: 1.3;
-}
+.pt-step-body { flex: 1; padding-top: 2px; min-width: 0; }
+.pt-name { font-size: 13px; font-weight: 500; line-height: 1.3; }
 .pt-name-pending { color: var(--muted); }
 .pt-name-running { color: var(--info); }
 .pt-name-done    { color: var(--fg); }
 .pt-name-error   { color: var(--destructive); }
 .pt-desc { font-size: 11px; color: var(--muted); margin-top: 1px; }
 
-.pt-step-badge { padding-top: 3px; min-width: 56px; text-align: right; }
+.pt-step-badge { padding-top: 3px; flex-shrink: 0; text-align: right; }
 
-/* badges */
 .pt-badge {
   display: inline-block; font-size: 11px; font-weight: 500;
   padding: 1px 8px; border-radius: var(--radius);
 }
-.pt-badge-done  { background: var(--success-bg); color: var(--success); }
-.pt-badge-run   { background: var(--info-bg); color: var(--info); }
-.pt-badge-err   { background: var(--destructive-bg); color: var(--destructive); }
+.pt-badge-done { background: var(--success-bg); color: var(--success); }
+.pt-badge-run  { background: var(--info-bg); color: var(--info); }
+.pt-badge-err  { background: var(--destructive-bg); color: var(--destructive); }
 
-/* spinner */
 .pt-spin {
   width: 12px; height: 12px;
   border: 1.5px solid #bfdbfe; border-top-color: var(--info);
@@ -145,6 +177,11 @@ _STYLESHEET = """\
 }
 @keyframes pt-r { to { transform: rotate(360deg); } }
 </style>"""
+
+_PLAY_ICON = (
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none">'
+    '<path d="M4 3l9 5-9 5V3z" fill="currentColor"/></svg>'
+)
 
 _CHECK = (
     '<svg width="12" height="12" viewBox="0 0 16 16" fill="none">'
@@ -154,7 +191,7 @@ _CHECK = (
 
 
 class PipelineTracker:
-    """Combined Run-All button + pipeline progress card.
+    """Single-widget pipeline card with integrated Run-All button.
 
     Parameters
     ----------
@@ -181,39 +218,11 @@ class PipelineTracker:
         self._elapsed: dict[str, float] = {}
         self._errors: dict[str, str] = {}
 
-        # ── Run All button (real ipywidget, not HTML) ──
-        self._btn = widgets.Button(
-            description="Run All Steps",
-            icon="play",
-            layout=widgets.Layout(width="100%", max_width="540px", height="36px"),
+        self._shown = False
+        self._widget = widgets.HTML(
+            layout=widgets.Layout(max_width="540px"),
         )
-        self._btn.add_class("pt-run-btn")
-        self._btn.on_click(self._on_run_all)
-
-        # ── Progress card (HTML) ──
-        self._html = widgets.HTML(
-            layout=widgets.Layout(width="100%", max_width="540px")
-        )
-        self._container = widgets.VBox(
-            [self._btn, self._html],
-            layout=widgets.Layout(width="100%", max_width="540px", gap="10px"),
-        )
-
         self._render()
-
-    # ── Run All handler ────────────────────────────────────────
-
-    @staticmethod
-    def _on_run_all(_btn):
-        display(Javascript(
-            "(function(){"
-            "if(typeof Jupyter!=='undefined'&&Jupyter.notebook)"
-            "{Jupyter.notebook.execute_all_cells_below();return;}"
-            "try{document.querySelector("
-            "'[data-command=\"notebook:run-all-below\"]').click()}"
-            "catch(e){console.warn('run-all-below unavailable',e)}"
-            "})()"
-        ))
 
     # ── HTML rendering ─────────────────────────────────────────
 
@@ -223,24 +232,28 @@ class PipelineTracker:
         pct = round(done / total * 100)
         running = any(v == "running" for v in self._status.values())
 
-        # hide button once pipeline starts
-        self._btn.layout.display = "none" if (done > 0 or running) else None
+        # Button visible only before pipeline starts
+        if done == 0 and not running:
+            btn = (
+                f'<button class="pt-btn" onclick="{_RUN_ALL_JS}">'
+                f'{_PLAY_ICON} Run All Steps</button>'
+            )
+        else:
+            btn = ""
 
         rows = ""
         for i, (key, label, desc) in enumerate(self._steps):
             st = self._status[key]
 
-            # dot content
             if st == "done":
                 dot = _CHECK
             elif st == "running":
                 dot = '<div class="pt-spin"></div>'
             elif st == "error":
-                dot = '<span style="color:#fff;font-size:11px">✕</span>'
+                dot = '<span style="color:#fff;font-size:11px">\u2715</span>'
             else:
                 dot = str(i + 1)
 
-            # badge
             if st == "done":
                 t = self._elapsed.get(key)
                 badge = (
@@ -254,7 +267,6 @@ class PipelineTracker:
             else:
                 badge = ""
 
-            # connector line
             line = ""
             if i < total - 1:
                 lc = "pt-line-on" if st == "done" else "pt-line-off"
@@ -277,9 +289,10 @@ class PipelineTracker:
             else f'<span class="pt-counter">{done}/{total}</span>'
         )
 
-        self._html.value = (
+        self._widget.value = (
             f'{_STYLESHEET}'
             f'<div class="pt-card">'
+            f'{btn}'
             f'<div class="pt-header">'
             f'<span class="pt-title">Pipeline</span>{counter}</div>'
             f'<div class="pt-progress">'
@@ -324,8 +337,10 @@ class PipelineTracker:
     # ── public API ─────────────────────────────────────────────
 
     def show(self) -> None:
-        """Display the combined control + progress widget."""
-        display(self._container)
+        """Display the tracker widget (idempotent)."""
+        if not self._shown:
+            display(self._widget)
+            self._shown = True
 
     @contextmanager
     def step(self, step_id: str):
@@ -344,3 +359,114 @@ class PipelineTracker:
             self._render()
             raise
         self._render()
+
+
+# ──────────────────────────────────────────────────────────────
+# Notebook injection utility
+# ──────────────────────────────────────────────────────────────
+
+#: Source code injected as the first code cell.
+_INJECT_SOURCE = """\
+import gromacs as gmx
+import nglview as nv
+import mdtraj as md
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+from functools import wraps
+
+from pipeline_tracker import PipelineTracker
+
+tracker = PipelineTracker()
+tracker.show()
+
+
+def _wrap_gmx_step(func_name, step_id, condition=None):
+    original = getattr(gmx, func_name)
+    @wraps(original)
+    def wrapped(*args, **kwargs):
+        if condition is not None and not condition(*args, **kwargs):
+            return original(*args, **kwargs)
+        with tracker.step(step_id):
+            return original(*args, **kwargs)
+    setattr(gmx, func_name, wrapped)
+
+
+if not getattr(gmx, '_pipeline_tracker_patched', False):
+    _wrap_gmx_step('pdb2gmx', 'topology')
+    _wrap_gmx_step('editconf', 'box')
+    _wrap_gmx_step('solvate', 'solvate')
+    _wrap_gmx_step('genion', 'ions')
+
+    _wrap_gmx_step('mdrun', 'minimize',
+                    condition=lambda *a, **k: k.get('deffnm') == 'em')
+    _wrap_gmx_step('mdrun', 'nvt',
+                    condition=lambda *a, **k: k.get('deffnm') == 'nvt')
+    _wrap_gmx_step('mdrun', 'npt',
+                    condition=lambda *a, **k: k.get('deffnm') == 'npt')
+    _wrap_gmx_step(
+        'grompp', 'production',
+        condition=lambda *a, **k: os.path.basename(
+            str(k.get('o', ''))) not in {
+                'ions.tpr', 'em.tpr', 'nvt.tpr', 'npt.tpr'})
+
+    gmx._pipeline_tracker_patched = True
+"""
+
+
+def inject_tracker(notebook_path: str | Path, output_path: str | Path | None = None) -> Path:
+    """Inject a pipeline-tracker cell into a notebook.
+
+    Inserts the tracker + monkey-patching code as the **first code cell**
+    (right after the initial title / markdown cell).  Existing cells are
+    left untouched.
+
+    Parameters
+    ----------
+    notebook_path : path
+        ``.ipynb`` file to modify.
+    output_path : path, optional
+        Where to write.  Defaults to overwriting *notebook_path*.
+
+    Returns
+    -------
+    Path
+        The path that was written.
+    """
+    nb_path = Path(notebook_path)
+    out = Path(output_path) if output_path else nb_path
+
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+
+    tracker_cell = {
+        "cell_type": "code",
+        "execution_count": None,
+        "metadata": {"tags": ["autorun"]},
+        "outputs": [],
+        "source": _INJECT_SOURCE.splitlines(keepends=True),
+    }
+
+    # Insert after the first markdown cell (usually the title).
+    insert = 0
+    for i, cell in enumerate(nb["cells"]):
+        if cell["cell_type"] == "markdown":
+            insert = i + 1
+            break
+
+    nb["cells"].insert(insert, tracker_cell)
+    out.write_text(json.dumps(nb, indent=1, ensure_ascii=False), encoding="utf-8")
+    return out
+
+
+# ── CLI ────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) >= 3 and sys.argv[1] == "inject":
+        target = sys.argv[2]
+        dest = sys.argv[3] if len(sys.argv) > 3 else None
+        result = inject_tracker(target, dest)
+        print(f"Injected tracker cell into {result}")
+    else:
+        print("Usage: python pipeline_tracker.py inject <notebook.ipynb> [output.ipynb]")
