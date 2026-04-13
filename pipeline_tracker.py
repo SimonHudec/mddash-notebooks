@@ -1,21 +1,15 @@
 """
 Pipeline progress tracker for MD simulation notebooks.
 
-Provides a visual in-notebook widget (ipywidgets.HTML) and writes
-a machine-readable ``pipeline-state.json`` to the working directory
-so that external tools (e.g. the MDDash dashboard) can monitor
-sub-step progress without any coupling to notebook internals.
+Provides a combined control + progress widget and writes
+``pipeline-state.json`` for dashboard consumption.
 
-Usage inside a notebook::
+Usage::
 
     from pipeline_tracker import PipelineTracker
 
-    tracker = PipelineTracker(steps=[
-        ("topology", "Topology Generation", "pdb2gmx · forcefield"),
-        ("box",      "Simulation Box",      "editconf · dodecahedron"),
-        ...
-    ])
-    tracker.show()
+    tracker = PipelineTracker()
+    tracker.show()          # renders Run All + step list in one card
 
     with tracker.step("topology"):
         gmx.pdb2gmx(...)
@@ -24,7 +18,6 @@ Usage inside a notebook::
 from __future__ import annotations
 
 import json
-import os
 import time as _time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -32,11 +25,11 @@ from pathlib import Path
 from typing import Sequence
 
 import ipywidgets as widgets
-from IPython.display import display
+from IPython.display import display, Javascript
 
-# ────────────────────────────────────────────────────────────────────
-# Default GROMACS protein MD setup steps
-# ────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# Default step definitions
+# ──────────────────────────────────────────────────────────────
 GROMACS_MD_STEPS: list[tuple[str, str, str]] = [
     ("topology",   "Topology Generation", "pdb2gmx · forcefield assignment"),
     ("box",        "Simulation Box",      "editconf · dodecahedral box"),
@@ -48,71 +41,130 @@ GROMACS_MD_STEPS: list[tuple[str, str, str]] = [
     ("production", "Production MD Setup", "Generate production run input"),
 ]
 
-# Protocol version written into pipeline-state.json
 _STATE_VERSION = 1
-
-# Name of the state file that external readers look for
 STATE_FILENAME = "pipeline-state.json"
+
+# ──────────────────────────────────────────────────────────────
+# shadcn/ui-inspired stylesheet
+#
+# Palette based on Zinc + semantic colors from shadcn defaults.
+# All classes are scoped under .pt-card to avoid notebook conflicts.
+# ──────────────────────────────────────────────────────────────
+_STYLESHEET = """\
+<style>
+.pt-card {
+  --radius: 8px;
+  --bg: #fff;
+  --border: #e4e4e7;       /* zinc-200 */
+  --fg: #09090b;           /* zinc-950 */
+  --muted: #71717a;        /* zinc-500 */
+  --muted-bg: #f4f4f5;     /* zinc-100 */
+  --accent: #18181b;       /* zinc-900 */
+  --success: #16a34a;      /* green-600 */
+  --success-bg: #f0fdf4;   /* green-50 */
+  --info: #2563eb;         /* blue-600 */
+  --info-bg: #eff6ff;      /* blue-50 */
+  --destructive: #dc2626;  /* red-600 */
+  --destructive-bg: #fef2f2;
+
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  max-width: 540px;
+}
+
+/* header row */
+.pt-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 16px;
+}
+.pt-title { font-size: 14px; font-weight: 600; color: var(--fg); }
+.pt-counter {
+  font-size: 12px; color: var(--muted); background: var(--muted-bg);
+  border-radius: 999px; padding: 2px 10px; font-weight: 500;
+}
+
+/* progress bar */
+.pt-progress {
+  height: 2px; background: var(--muted-bg); border-radius: 1px;
+  margin-bottom: 20px; overflow: hidden;
+}
+.pt-progress-fill {
+  height: 100%; background: var(--success); border-radius: 1px;
+  transition: width .35s ease;
+}
+
+/* step rows */
+.pt-step { display: flex; align-items: flex-start; min-height: 40px; }
+.pt-step-left {
+  display: flex; flex-direction: column; align-items: center;
+  margin-right: 12px; flex-shrink: 0;
+}
+.pt-dot {
+  width: 24px; height: 24px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 600;
+}
+.pt-dot-pending  { border: 1.5px solid var(--border); background: var(--bg); color: var(--muted); }
+.pt-dot-running  { border: 1.5px solid var(--info); background: var(--info-bg); }
+.pt-dot-done     { background: var(--success); }
+.pt-dot-error    { background: var(--destructive); }
+
+.pt-line { width: 1.5px; height: 16px; margin: 2px 0; }
+.pt-line-off { background: var(--border); }
+.pt-line-on  { background: var(--success); opacity: .45; }
+
+.pt-step-body { flex: 1; padding-top: 2px; }
+.pt-name {
+  font-size: 13px; font-weight: 500; line-height: 1.3;
+}
+.pt-name-pending { color: var(--muted); }
+.pt-name-running { color: var(--info); }
+.pt-name-done    { color: var(--fg); }
+.pt-name-error   { color: var(--destructive); }
+.pt-desc { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+.pt-step-badge { padding-top: 3px; min-width: 56px; text-align: right; }
+
+/* badges */
+.pt-badge {
+  display: inline-block; font-size: 11px; font-weight: 500;
+  padding: 1px 8px; border-radius: var(--radius);
+}
+.pt-badge-done  { background: var(--success-bg); color: var(--success); }
+.pt-badge-run   { background: var(--info-bg); color: var(--info); }
+.pt-badge-err   { background: var(--destructive-bg); color: var(--destructive); }
+
+/* spinner */
+.pt-spin {
+  width: 12px; height: 12px;
+  border: 1.5px solid #bfdbfe; border-top-color: var(--info);
+  border-radius: 50%; animation: pt-r .65s linear infinite;
+}
+@keyframes pt-r { to { transform: rotate(360deg); } }
+</style>"""
+
+_CHECK = (
+    '<svg width="12" height="12" viewBox="0 0 16 16" fill="none">'
+    '<path d="M13.3 4.3 6.3 11.3 2.7 7.7" stroke="#fff" stroke-width="2"'
+    ' stroke-linecap="round" stroke-linejoin="round"/></svg>'
+)
 
 
 class PipelineTracker:
-    """Visual pipeline tracker with optional filesystem state output.
+    """Combined Run-All button + pipeline progress card.
 
     Parameters
     ----------
-    steps : sequence of (id, label, description) tuples, optional
-        Pipeline step definitions.  Defaults to :data:`GROMACS_MD_STEPS`.
-    notebook_name : str, optional
-        Human-readable name written into the state file.
-    state_dir : str or Path, optional
-        Directory where ``pipeline-state.json`` is written.
-        Defaults to the current working directory.  Set to ``None``
-        to disable file output entirely.
+    steps : sequence of (id, label, description) tuples
+        Pipeline step definitions.  Defaults to GROMACS MD steps.
+    notebook_name : str
+        Label written into the JSON state file.
+    state_dir : str | Path | None
+        Where to write ``pipeline-state.json``.  ``None`` disables it.
     """
-
-    # ── CSS (inlined inside the widget for notebook portability) ───
-    _CSS = """\
-<style>
-.pipe{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-      background:#fff;border:1px solid #e2e8f0;border-radius:12px;
-      padding:20px 24px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
-.pipe-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
-.pipe-title{font-size:14px;font-weight:600;color:#0f172a;letter-spacing:-.01em}
-.pipe-cnt{font-size:12px;color:#64748b;background:#f1f5f9;border-radius:999px;
-          padding:2px 10px;font-weight:500}
-.pipe-bar{height:3px;background:#f1f5f9;border-radius:2px;margin-bottom:18px;overflow:hidden}
-.pipe-fill{height:100%;border-radius:2px;background:linear-gradient(90deg,#22c55e,#4ade80);
-           transition:width .4s ease}
-.pipe-row{display:flex;align-items:flex-start;min-height:48px}
-.pipe-left{display:flex;flex-direction:column;align-items:center;margin-right:12px;flex-shrink:0}
-.pipe-ind{width:26px;height:26px;border-radius:50%;display:flex;
-          align-items:center;justify-content:center}
-.pipe-ind-pending{border:1.5px solid #e2e8f0;background:#f8fafc}
-.pipe-ind-running{border:2px solid #3b82f6;background:#eff6ff}
-.pipe-ind-done{background:#22c55e}
-.pipe-ind-error{background:#ef4444;color:#fff;font-size:12px;font-weight:700}
-.pipe-conn{width:1.5px;height:22px;margin:3px 0}
-.pipe-conn-off{background:#e2e8f0}.pipe-conn-on{background:#86efac}
-.pipe-mid{flex:1;padding-top:2px}
-.pipe-lbl{font-size:13px;font-weight:500;line-height:1.4}
-.pipe-lbl-pending{color:#94a3b8}.pipe-lbl-running{color:#1d4ed8}
-.pipe-lbl-done{color:#0f172a}.pipe-lbl-error{color:#dc2626}
-.pipe-desc{font-size:11.5px;color:#94a3b8;margin-top:1px}
-.pipe-right{padding-top:4px;min-width:65px;text-align:right}
-.pipe-badge{font-size:11px;font-weight:500;padding:1px 8px;border-radius:999px}
-.pipe-bg-green{background:#dcfce7;color:#16a34a}
-.pipe-bg-blue{background:#dbeafe;color:#2563eb}
-.pipe-bg-red{background:#fee2e2;color:#dc2626}
-.pipe-spin{width:12px;height:12px;border:2px solid #bfdbfe;border-top:2px solid #3b82f6;
-           border-radius:50%;animation:pipe-s .7s linear infinite}
-@keyframes pipe-s{to{transform:rotate(360deg)}}
-</style>"""
-
-    _CHECK_SVG = (
-        '<svg width="14" height="14" viewBox="0 0 16 16">'
-        '<path d="M6.3 11.3 3 8l1-1 2.3 2.3L11.7 4l1 1z" fill="#fff"/>'
-        "</svg>"
-    )
 
     def __init__(
         self,
@@ -125,95 +177,120 @@ class PipelineTracker:
         self._state_dir = Path(state_dir) if state_dir is not None else None
         self._started_at = datetime.now(timezone.utc).isoformat()
 
-        # per-step mutable state
         self._status: dict[str, str] = {s[0]: "pending" for s in self._steps}
         self._elapsed: dict[str, float] = {}
         self._errors: dict[str, str] = {}
 
-        self._widget = widgets.HTML(
-            layout=widgets.Layout(width="100%", max_width="640px")
+        # ── Run All button (real ipywidget, not HTML) ──
+        self._btn = widgets.Button(
+            description="Run All Steps",
+            icon="play",
+            layout=widgets.Layout(width="100%", max_width="540px", height="36px"),
         )
+        self._btn.add_class("pt-run-btn")
+        self._btn.on_click(self._on_run_all)
+
+        # ── Progress card (HTML) ──
+        self._html = widgets.HTML(
+            layout=widgets.Layout(width="100%", max_width="540px")
+        )
+        self._container = widgets.VBox(
+            [self._btn, self._html],
+            layout=widgets.Layout(width="100%", max_width="540px", gap="10px"),
+        )
+
         self._render()
 
-    # ── in-notebook HTML rendering ─────────────────────────────────
+    # ── Run All handler ────────────────────────────────────────
+
+    @staticmethod
+    def _on_run_all(_btn):
+        display(Javascript(
+            "(function(){"
+            "if(typeof Jupyter!=='undefined'&&Jupyter.notebook)"
+            "{Jupyter.notebook.execute_all_cells_below();return;}"
+            "try{document.querySelector("
+            "'[data-command=\"notebook:run-all-below\"]').click()}"
+            "catch(e){console.warn('run-all-below unavailable',e)}"
+            "})()"
+        ))
+
+    # ── HTML rendering ─────────────────────────────────────────
 
     def _render(self) -> None:
         done = sum(1 for v in self._status.values() if v == "done")
         total = len(self._steps)
         pct = round(done / total * 100)
+        running = any(v == "running" for v in self._status.values())
+
+        # hide button once pipeline starts
+        self._btn.layout.display = "none" if (done > 0 or running) else None
 
         rows = ""
         for i, (key, label, desc) in enumerate(self._steps):
             st = self._status[key]
 
+            # dot content
             if st == "done":
-                icon = self._CHECK_SVG
+                dot = _CHECK
             elif st == "running":
-                icon = '<div class="pipe-spin"></div>'
+                dot = '<div class="pt-spin"></div>'
             elif st == "error":
-                icon = "✕"
+                dot = '<span style="color:#fff;font-size:11px">✕</span>'
             else:
-                icon = (
-                    f'<span style="font-size:11px;font-weight:600;'
-                    f'color:#94a3b8">{i + 1}</span>'
-                )
+                dot = str(i + 1)
 
+            # badge
             if st == "done":
                 t = self._elapsed.get(key)
                 badge = (
-                    f'<span class="pipe-badge pipe-bg-green">{t:.1f}s</span>'
+                    f'<span class="pt-badge pt-badge-done">{t:.1f}s</span>'
                     if t else ""
                 )
             elif st == "running":
-                badge = '<span class="pipe-badge pipe-bg-blue">running</span>'
+                badge = '<span class="pt-badge pt-badge-run">running</span>'
             elif st == "error":
-                badge = '<span class="pipe-badge pipe-bg-red">error</span>'
+                badge = '<span class="pt-badge pt-badge-err">error</span>'
             else:
                 badge = ""
 
-            conn = ""
+            # connector line
+            line = ""
             if i < total - 1:
-                cc = "pipe-conn-on" if st == "done" else "pipe-conn-off"
-                conn = f'<div class="pipe-conn {cc}"></div>'
+                lc = "pt-line-on" if st == "done" else "pt-line-off"
+                line = f'<div class="pt-line {lc}"></div>'
 
             rows += (
-                f'<div class="pipe-row">'
-                f'<div class="pipe-left">'
-                f'<div class="pipe-ind pipe-ind-{st}">{icon}</div>{conn}'
-                f"</div>"
-                f'<div class="pipe-mid">'
-                f'<div class="pipe-lbl pipe-lbl-{st}">{label}</div>'
-                f'<div class="pipe-desc">{desc}</div>'
-                f"</div>"
-                f'<div class="pipe-right">{badge}</div>'
-                f"</div>"
+                f'<div class="pt-step">'
+                f'<div class="pt-step-left">'
+                f'<div class="pt-dot pt-dot-{st}">{dot}</div>{line}</div>'
+                f'<div class="pt-step-body">'
+                f'<div class="pt-name pt-name-{st}">{label}</div>'
+                f'<div class="pt-desc">{desc}</div></div>'
+                f'<div class="pt-step-badge">{badge}</div>'
+                f'</div>'
             )
 
-        header_badge = (
-            '<span class="pipe-cnt">✓ Complete</span>'
+        counter = (
+            '<span class="pt-counter">Complete</span>'
             if done == total
-            else f'<span class="pipe-cnt">{done} / {total}</span>'
+            else f'<span class="pt-counter">{done}/{total}</span>'
         )
 
-        self._widget.value = (
-            f"{self._CSS}"
-            f'<div class="pipe">'
-            f'<div class="pipe-hd">'
-            f'<span class="pipe-title">Pipeline Status</span>{header_badge}'
-            f"</div>"
-            f'<div class="pipe-bar">'
-            f'<div class="pipe-fill" style="width:{pct}%"></div>'
-            f"</div>"
-            f"{rows}</div>"
+        self._html.value = (
+            f'{_STYLESHEET}'
+            f'<div class="pt-card">'
+            f'<div class="pt-header">'
+            f'<span class="pt-title">Pipeline</span>{counter}</div>'
+            f'<div class="pt-progress">'
+            f'<div class="pt-progress-fill" style="width:{pct}%"></div></div>'
+            f'{rows}</div>'
         )
-
-        # also persist to disk for external readers
         self._write_state()
 
-    # ── filesystem state output ────────────────────────────────────
+    # ── JSON state file ────────────────────────────────────────
 
     def _write_state(self) -> None:
-        """Write ``pipeline-state.json`` atomically for dashboard consumption."""
         if self._state_dir is None:
             return
         try:
@@ -224,8 +301,7 @@ class PipelineTracker:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "steps": [
                     {
-                        "id": key,
-                        "label": label,
+                        "id": key, "label": label,
                         "status": self._status[key],
                         "elapsed": self._elapsed.get(key),
                         "error": self._errors.get(key),
@@ -241,23 +317,19 @@ class PipelineTracker:
             path = self._state_dir / STATE_FILENAME
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(state, indent=2))
-            tmp.replace(path)  # atomic on POSIX; near-atomic on Windows
+            tmp.replace(path)
         except OSError:
-            pass  # non-fatal: widget still works even if disk write fails
+            pass
 
-    # ── public API ─────────────────────────────────────────────────
+    # ── public API ─────────────────────────────────────────────
 
     def show(self) -> None:
-        """Display the tracker widget in the notebook."""
-        display(self._widget)
+        """Display the combined control + progress widget."""
+        display(self._container)
 
     @contextmanager
     def step(self, step_id: str):
-        """Context manager that tracks a pipeline step.
-
-        Sets the step to *running*, yields, then marks it *done*
-        (or *error* if an exception propagates).  Duration is recorded.
-        """
+        """Context manager wrapping a pipeline step."""
         self._status[step_id] = "running"
         self._render()
         t0 = _time.time()
