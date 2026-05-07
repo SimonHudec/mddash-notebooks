@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "notebook": "c:\\Users\\simon\\Desktop\\MUNIFI_FINISH\\bc\\mddash-notebooks\\protein-simulation-setup.ipynb",
+  "updated_at": 1778160952.0394757,
+  "steps": [
+    {
+      "id": "gromacs-simulation-setup-for-basic-protein-md",
+      "label": "Gromacs simulation setup for basic protein MD",
+      "source": "heading",
+      "status": "done",
+      "started_at": 1778160856.6356313,
+      "finished_at": 1778160856.639311,
+      "error": null
+    },
+    {
+      "id": "just-import-what-we-need",
+      "label": "Just import what we need",
+      "source": "heading",
+      "status": "error",
+      "started_at": 1778160856.667231,
+      "finished_at": 1778160857.1424866,
+      "error": "ModuleNotFoundError: No module named 'gromacs'"
+    },
+    {
+      "id": "look-at-the-input",
+      "label": "Look at the input",
+      "source": "heading",
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "error": null
+    },
+    {
+      "id": "parse-the-input",
+      "label": "Parse the input",
+      "source": "heading",
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "error": null
+    },
+    {
+      "id": "simulation-box",
+      "label": "Simulation box",
+      "source": "heading",
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "error": null
+    },
+    {
+      "id": "solvate",
+      "label": "Solvate",
+      "source": "heading",
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "error": null
+    },
+    {
+      "id": "add-counterions",
+      "label": "Add counterions",
+      "source": "heading",
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "error": null
+    },
+    {
+      "id": "minimize",
+      "label": "Minimize",
+      "source": "heading",
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "error": null
+    },
+    {
+      "id": "constant-number-volume-temperature",
+      "label": "Constant Number-Volume-Temperature",
+      "source": "heading",
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "error": null
+    },
+    {
+      "id": "constant-number-pressure-temperature",
+      "label": "Constant Number-Pressure-Temperature",
+      "source": "heading",
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "error": null
+    },
+    {
+      "id": "prepare-production-simulation",
+      "label": "Prepare production simulation",
+      "source": "heading",
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "error": null
+    }
+  ]
+}

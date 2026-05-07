@@ -302,16 +302,20 @@ class PipelineTracker:
             return
         self._initialised = True
 
+        print("PipelineTracker.__init__: start", flush=True)
         self.state_path = Path(state_file)
+        print("PipelineTracker.__init__: locating notebook...", flush=True)
         self.notebook_path = Path(notebook_path) if notebook_path \
             else _find_notebook()
+        print(f"PipelineTracker.__init__: notebook = {self.notebook_path}",
+              flush=True)
 
         self._steps: List[_Step] = []
         self._cell_to_step: Dict[str, _Step] = {}  # normalised src -> step
         self._displayed = False
         self._hooks_registered = False
 
-        # Build widgets but do not display yet.
+        print("PipelineTracker.__init__: building widgets...", flush=True)
         # The Output widget is needed so that Javascript() dispatched from
         # the button callback has a display context capable of rendering
         # the application/javascript MIME type. Without it the JS is
@@ -342,19 +346,26 @@ class PipelineTracker:
             [self._buttons, self._html, self._js_out]
         )
 
+        print("PipelineTracker.__init__: registering kernel hooks...",
+              flush=True)
         self._register_hooks()
+        print("PipelineTracker.__init__: done", flush=True)
 
     # -- public API --------------------------------------------------------
 
     def show(self) -> None:
         """Render (or re-render) the progress card. Idempotent."""
+        print("PipelineTracker: discovering steps...", flush=True)
         self._discover()
+        print(f"PipelineTracker: {len(self._steps)} steps discovered "
+              f"from {self.notebook_path}", flush=True)
         self._render()
         if not self._displayed:
             display(widgets.HTML(_STYLESHEET))
             display(self._container)
             self._displayed = True
         self._write_state()
+        print("PipelineTracker: ready.", flush=True)
 
     @contextmanager
     def step(self, label: str):
