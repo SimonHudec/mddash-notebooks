@@ -640,152 +640,167 @@ class PipelineTracker:
 # In modern JupyterLab the application instance is only exposed on
 # ``window.jupyterapp`` when the admin sets
 # ``LabApp.expose_app_in_browser = True``. On managed JupyterHub
-# deployments that flag is usually off, so we also try DOM fallbacks:
-# first currently-mounted buttons/menu items, then the top Run menu.
+# deployments that flag is usually off, so we also try DOM fallbacks.
+# On this JupyterHub, the only exposed frontend run-all action is often
+# "Restart Kernel and Run All Cells", so we can use that and confirm the
+# dialog automatically. It still keeps outputs in their proper cells.
 _RUN_ALL_JS = """
 (async function () {
-  function log(msg) { console.log('PipelineTracker:', msg); }
+        function log(msg) { console.log('PipelineTracker:', msg); }
 
-    function sleep(ms) {
-        return new Promise(function (resolve) { setTimeout(resolve, ms); });
-    }
-
-    function clickElement(el) {
-        log('clicking target ' + el.tagName);
-        el.dispatchEvent(new MouseEvent('mousedown', {
-            bubbles: true,
-            cancelable: true,
-            view: window
-        }));
-        el.dispatchEvent(new MouseEvent('mouseup', {
-            bubbles: true,
-            cancelable: true,
-            view: window
-        }));
-        el.click();
-    }
-
-    function textOf(el) {
-        return (
-            (el.getAttribute('aria-label') || '') + ' ' +
-            (el.getAttribute('title') || '') + ' ' +
-            (el.textContent || '')
-        ).toLowerCase().replace(/\s+/g, ' ').trim();
-    }
-
-    function isTrackerButton(el) {
-        return Boolean(
-            el.closest('.pt-run-btn') || el.closest('.pt-run-btn-secondary')
-        );
-    }
-
-    function isUsableRunAllLabel(txt) {
-        if (!txt.includes('run all')) return false;
-        if (txt.includes('restart')) return false;
-        if (txt.includes('above') || txt.includes('below')) return false;
-        if (txt.includes('selected')) return false;
-        return true;
-    }
-
-  function findByDataCommand() {
-    const sels = [
-      '[data-command="notebook:run-all-cells"]',
-      '[data-command="runmenu:run-all"]',
-      '[data-jp-command-id="notebook:run-all-cells"]',
-      '[data-jp-command-id="runmenu:run-all"]',
-    ];
-    for (const sel of sels) {
-      const el = document.querySelector(sel);
-            if (el && !isTrackerButton(el)) { log('matched ' + sel); return el; }
-    }
-    return null;
-  }
-
-  function findByLabel() {
-    // Walk every clickable element and look for "run all" in its
-    // aria-label, title, or text content. Prefer plain "Run All Cells"
-    // and explicitly skip "Restart..." which opens a confirm dialog.
-    const all = document.querySelectorAll(
-      'button, jp-button, [role="menuitem"], li.lm-Menu-item'
-    );
-    for (const el of all) {
-      // Never match the tracker's own buttons (would self-trigger).
-            if (isTrackerButton(el)) continue;
-            const txt = textOf(el);
-            if (!isUsableRunAllLabel(txt)) continue;
-      log('matched by label: ' + txt.trim().slice(0, 80));
-      return el;
-    }
-        return null;
-    }
-
-    function findRunMenuBarItem() {
-        const items = document.querySelectorAll(
-            '.lm-MenuBar-item, .p-MenuBar-item, [role="menuitem"], li'
-        );
-        for (const el of items) {
-            const txt = textOf(el);
-            if (txt === 'run') return el;
-        }
-        for (const el of items) {
-            const txt = textOf(el);
-            if (txt.includes('run') && !txt.includes('running')) return el;
-        }
-        return null;
-  }
-
-  try {
-    // 1. Lab app singleton (only when expose_app_in_browser=True).
-    const app =
-      window.jupyterapp ||
-      window.jupyterlab ||
-      (window._JUPYTERLAB && window._JUPYTERLAB.application);
-    if (app && app.commands) {
-      log('using app.commands.execute');
-      await app.commands.execute('notebook:run-all-cells');
-      return;
-    }
-
-    // 2. Toolbar/menu item via data-command.
-    let target = findByDataCommand();
-
-        // 3. Walk currently mounted DOM by label.
-    if (!target) target = findByLabel();
-
-    if (target) {
-            clickElement(target);
-      return;
-    }
-
-        // 4. JupyterLab mounts top-menu items only after the menu opens.
-        const runMenu = findRunMenuBarItem();
-        if (runMenu) {
-            log('opening Run menu');
-            clickElement(runMenu);
-            await sleep(250);
-
-            target = findByDataCommand() || findByLabel();
-            if (target) {
-                clickElement(target);
-                return;
-            }
+        function sleep(ms) {
+                return new Promise(function (resolve) { setTimeout(resolve, ms); });
         }
 
-        // 5. Classic Notebook fallback.
-    if (window.Jupyter && Jupyter.notebook) {
-      log('using classic Jupyter.notebook');
-      Jupyter.notebook.execute_all_cells();
-      return;
-    }
+        function textOf(el) {
+                return (
+                        (el.getAttribute('aria-label') || '') + ' ' +
+                        (el.getAttribute('title') || '') + ' ' +
+                        (el.textContent || '')
+                ).toLowerCase().replace(/\\s+/g, ' ').trim();
+        }
 
-    console.warn(
-      'PipelineTracker: no Run-All target found. ' +
-            'Use Run \u2192 Run All Cells from the menu, or ' +
-      'the "Run All (kernel)" button as a last resort.'
-    );
-  } catch (e) {
-    console.error('PipelineTracker run-all failed:', e);
-  }
+        function isTrackerButton(el) {
+                return Boolean(
+                        el.closest('.pt-run-btn') || el.closest('.pt-run-btn-secondary')
+                );
+        }
+
+        function clickElement(el) {
+                log('clicking ' + el.tagName + ': ' + textOf(el).slice(0, 90));
+                el.dispatchEvent(new MouseEvent('mousedown', {
+                        bubbles: true, cancelable: true, view: window
+                }));
+                el.dispatchEvent(new MouseEvent('mouseup', {
+                        bubbles: true, cancelable: true, view: window
+                }));
+                el.click();
+        }
+
+        function allClickable() {
+                return Array.from(document.querySelectorAll(
+                        'button, jp-button, [role="menuitem"], li.lm-Menu-item, ' +
+                        'li.p-Menu-item, .lm-Menu-item, .p-Menu-item'
+                )).filter(function (el) { return !isTrackerButton(el); });
+        }
+
+        function findPlainRunAll() {
+                const selectors = [
+                        '[data-command="notebook:run-all-cells"]',
+                        '[data-command="runmenu:run-all"]',
+                        '[data-jp-command-id="notebook:run-all-cells"]',
+                        '[data-jp-command-id="runmenu:run-all"]'
+                ];
+                for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (el && !isTrackerButton(el)) {
+                                log('matched plain run-all selector ' + sel);
+                                return el;
+                        }
+                }
+                for (const el of allClickable()) {
+                        const txt = textOf(el);
+                        if (!txt.includes('run all')) continue;
+                        if (txt.includes('restart')) continue;
+                        if (txt.includes('above') || txt.includes('below')) continue;
+                        if (txt.includes('selected')) continue;
+                        log('matched plain run-all label: ' + txt.slice(0, 90));
+                        return el;
+                }
+                return null;
+        }
+
+        function findRestartRunAll() {
+                const selectors = [
+                        '[data-command="notebook:restart-run-all"]',
+                        '[data-command="runmenu:restart-and-run-all"]',
+                        '[data-jp-command-id="notebook:restart-run-all"]',
+                        '[data-jp-command-id="runmenu:restart-and-run-all"]'
+                ];
+                for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (el && !isTrackerButton(el)) {
+                                log('matched restart run-all selector ' + sel);
+                                return el;
+                        }
+                }
+                for (const el of allClickable()) {
+                        const txt = textOf(el);
+                        if (txt.includes('restart') && txt.includes('run all')) {
+                                log('matched restart run-all label: ' + txt.slice(0, 90));
+                                return el;
+                        }
+                }
+                return null;
+        }
+
+        async function confirmRestartDialog() {
+                for (let i = 0; i < 40; i++) {
+                        const buttons = Array.from(document.querySelectorAll(
+                                '.jp-Dialog button, .jp-Dialog-button, button.jp-mod-accept, ' +
+                                'button.jp-Dialog-button, button'
+                        ));
+                        for (const btn of buttons) {
+                                if (isTrackerButton(btn)) continue;
+                                const txt = textOf(btn);
+                                const accepts = btn.classList.contains('jp-mod-accept') ||
+                                        txt === 'restart' || txt.includes('restart');
+                                if (accepts && !btn.disabled) {
+                                        log('confirming restart dialog');
+                                        clickElement(btn);
+                                        return true;
+                                }
+                        }
+                        await sleep(100);
+                }
+                return false;
+        }
+
+        try {
+                const app =
+                        window.jupyterapp ||
+                        window.jupyterlab ||
+                        (window._JUPYTERLAB && window._JUPYTERLAB.application);
+                if (app && app.commands) {
+                        log('using app.commands.execute(notebook:run-all-cells)');
+                        await app.commands.execute('notebook:run-all-cells');
+                        return;
+                }
+
+                let target = findPlainRunAll();
+                if (target) {
+                        clickElement(target);
+                        return;
+                }
+
+                target = findRestartRunAll();
+                if (target) {
+                        log('using restart-and-run-all frontend fallback');
+                        clickElement(target);
+                        const confirmed = await confirmRestartDialog();
+                        if (!confirmed) {
+                                console.warn(
+                                        'PipelineTracker: restart dialog opened, but I could not ' +
+                                        'find the confirmation button. Click Restart manually.'
+                                );
+                        }
+                        return;
+                }
+
+                if (window.Jupyter && Jupyter.notebook) {
+                        log('using classic Jupyter.notebook');
+                        Jupyter.notebook.execute_all_cells();
+                        return;
+                }
+
+                console.warn(
+                        'PipelineTracker: no frontend run-all action found. ' +
+                        'Use Run -> Restart Kernel and Run All Cells, or the ' +
+                        '"Run All (kernel)" button as a last resort.'
+                );
+        } catch (e) {
+                console.error('PipelineTracker run-all failed:', e);
+        }
 })();
 """
 
