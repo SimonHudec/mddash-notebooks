@@ -305,14 +305,22 @@ class PipelineTracker:
         self._hooks_registered = False
 
         # Build widgets but do not display yet.
+        # The Output widget is needed so that Javascript() dispatched from
+        # the button callback has a display context capable of rendering
+        # the application/javascript MIME type. Without it the JS is
+        # rendered as the text repr of the Javascript object and never
+        # executed.
         self._html = widgets.HTML(value="")
+        self._js_out = widgets.Output()
         self._run_btn = widgets.Button(
             description="Run All",
             tooltip="Execute every cell in this notebook",
         )
         self._run_btn.add_class("pt-run-btn")
         self._run_btn.on_click(self._on_run_all_click)
-        self._container = widgets.VBox([self._run_btn, self._html])
+        self._container = widgets.VBox(
+            [self._run_btn, self._html, self._js_out]
+        )
 
         self._register_hooks()
 
@@ -556,7 +564,11 @@ class PipelineTracker:
 
         # Dispatch to the frontend. Works in JupyterLab and Notebook 7.
         # The fallback handles the (deprecated) classic Notebook.
-        display(Javascript(_RUN_ALL_JS))
+        # We must route this through an Output widget; otherwise the
+        # callback has no notebook cell to attach the JS display to.
+        self._js_out.clear_output()
+        with self._js_out:
+            display(Javascript(_RUN_ALL_JS))
 
 
 # Triggers the standard "Run all cells" action in the active notebook.
