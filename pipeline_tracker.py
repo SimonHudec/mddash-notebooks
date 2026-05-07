@@ -106,6 +106,13 @@ _STYLESHEET = """
 }
 .pt-run-btn button:hover { background: #27272a !important; }
 .pt-run-btn button:disabled { opacity: 0.5 !important; }
+.pt-run-btn-secondary button {
+  background: #ffffff !important; color: #18181b !important;
+  border: 1px solid #d4d4d8 !important; border-radius: 8px !important;
+  padding: 6px 14px !important; font-weight: 500 !important;
+}
+.pt-run-btn-secondary button:hover { background: #f4f4f5 !important; }
+.pt-run-btn-secondary button:disabled { opacity: 0.5 !important; }
 </style>
 """
 
@@ -314,12 +321,25 @@ class PipelineTracker:
         self._js_out = widgets.Output()
         self._run_btn = widgets.Button(
             description="Run All",
-            tooltip="Execute every cell in this notebook",
+            tooltip="Run every cell via the Jupyter frontend (preferred)",
         )
         self._run_btn.add_class("pt-run-btn")
         self._run_btn.on_click(self._on_run_all_click)
+
+        self._run_btn_kernel = widgets.Button(
+            description="Run All (kernel)",
+            tooltip=(
+                "Run every cell from inside the kernel. Use this when the "
+                "frontend Run All does not start (e.g. JupyterLab without "
+                "expose_app_in_browser). Cell outputs all land in this cell."
+            ),
+        )
+        self._run_btn_kernel.add_class("pt-run-btn-secondary")
+        self._run_btn_kernel.on_click(self._on_run_all_kernel_click)
+
+        self._buttons = widgets.HBox([self._run_btn, self._run_btn_kernel])
         self._container = widgets.VBox(
-            [self._run_btn, self._html, self._js_out]
+            [self._buttons, self._html, self._js_out]
         )
 
         self._register_hooks()
@@ -552,7 +572,35 @@ class PipelineTracker:
         clicked Run on each one; our IPython hooks update progress as
         they fire.
         """
-        # Refresh discovery in case the notebook was edited.
+        self._reset_steps()
+
+        # Dispatch to the frontend. Works in JupyterLab and Notebook 7.
+        # We must route this through an Output widget; otherwise the
+        # callback has no notebook cell to attach the JS display to.
+        self._js_out.clear_output()
+        with self._js_out:
+            display(Javascript(_RUN_ALL_JS))
+
+    # -- Run All (kernel-side fallback) -----------------------------------
+
+    def _on_run_all_kernel_click(self, _btn) -> None:
+        """
+        Fallback: execute every code cell directly through the kernel.
+        Used in environments where the frontend command API is not
+        reachable (e.g. JupyterLab without ``expose_app_in_browser``).
+        All cell outputs (prints, widgets, errors) appear inside this
+        cell rather than in their own cells.
+        """
+        self._reset_steps()
+        self._run_btn.disabled = True
+        self._run_btn_kernel.disabled = True
+        try:
+            self._run_all_kernel()
+        finally:
+            self._run_btn.disabled = False
+            self._run_btn_kernel.disabled = False
+
+    def _reset_steps(self) -> None:
         self._discover()
         for s in self._steps:
             s.status = PENDING
@@ -562,23 +610,59 @@ class PipelineTracker:
         self._render()
         self._write_state()
 
-        # Dispatch to the frontend. Works in JupyterLab and Notebook 7.
-        # The fallback handles the (deprecated) classic Notebook.
-        # We must route this through an Output widget; otherwise the
-        # callback has no notebook cell to attach the JS display to.
-        self._js_out.clear_output()
-        with self._js_out:
-            display(Javascript(_RUN_ALL_JS))
+    def _run_all_kernel(self) -> None:
+        ip = get_ipython()
+        if ip is None:
+            print("Kernel-side Run All requires an IPython kernel.")
+            return
+        if not self.notebook_path or not self.notebook_path.exists():
+            print("Could not locate the notebook on disk.")
+            return
+        try:
+            nb = json.loads(self.notebook_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"Failed to read notebook: {e}")
+            return
+        for cell in nb.get("cells", []):
+            if cell.get("cell_type") != "code":
+                continue
+            src = "".join(cell.get("source", []))
+            if not src.strip() or _is_tracker_cell(src):
+                continue
+            # The pre/post_run_cell hooks will update step status as we go.
+            result = ip.run_cell(src, store_history=False)
+            if not result.success:
+                # The hook has already marked the failing step as error;
+                # stop the rest of the run.
+                return
 
 
 # Triggers the standard "Run all cells" action in the active notebook.
-# JupyterLab 4 / Notebook 7 expose `commands` on a JupyterFrontEnd singleton
-# that has been registered as `window.jupyterapp` in modern builds; we also
-# look it up via _JUPYTERLAB as a fallback. Classic Notebook is handled
-# via its global Jupyter object.
+# In modern JupyterLab the application instance is only exposed on
+# ``window.jupyterapp`` when the admin sets
+# ``LabApp.expose_app_in_browser = True``. On managed JupyterHub
+# deployments that flag is usually off, so we also try a DOM fallback:
+# clicking the toolbar's "restart kernel and run all cells" button,
+# which is reachable without the app singleton.
 _RUN_ALL_JS = """
 (async function () {
+  function findToolbarButton() {
+    // JupyterLab toolbar items expose data-command on their button.
+    const selectors = [
+      'button[data-command="notebook:run-all-cells"]',
+      'button[data-command="runmenu:run-all"]',
+      'jp-button[data-command="notebook:run-all-cells"]',
+      'jp-button[data-command="runmenu:run-all"]',
+    ];
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (el) return el;
+    }
+    return null;
+  }
+
   try {
+    // 1. Preferred: command registry on the LabApp singleton.
     const app =
       window.jupyterapp ||
       window.jupyterlab ||
@@ -587,11 +671,24 @@ _RUN_ALL_JS = """
       await app.commands.execute('notebook:run-all-cells');
       return;
     }
+
+    // 2. Fallback: click the toolbar button directly.
+    const btn = findToolbarButton();
+    if (btn) {
+      btn.click();
+      return;
+    }
+
+    // 3. Classic Notebook fallback.
     if (window.Jupyter && Jupyter.notebook) {
       Jupyter.notebook.execute_all_cells();
       return;
     }
-    console.warn('PipelineTracker: no Jupyter frontend API found.');
+
+    console.warn(
+      'PipelineTracker: no Jupyter frontend API found. ' +
+      'Use the "Run All (kernel)" button instead.'
+    );
   } catch (e) {
     console.error('PipelineTracker run-all failed:', e);
   }
