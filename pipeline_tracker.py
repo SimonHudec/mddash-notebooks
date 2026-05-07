@@ -302,20 +302,15 @@ class PipelineTracker:
             return
         self._initialised = True
 
-        print("PipelineTracker.__init__: start", flush=True)
         self.state_path = Path(state_file)
-        print("PipelineTracker.__init__: locating notebook...", flush=True)
         self.notebook_path = Path(notebook_path) if notebook_path \
             else _find_notebook()
-        print(f"PipelineTracker.__init__: notebook = {self.notebook_path}",
-              flush=True)
 
         self._steps: List[_Step] = []
         self._cell_to_step: Dict[str, _Step] = {}  # normalised src -> step
         self._displayed = False
         self._hooks_registered = False
 
-        print("PipelineTracker.__init__: building widgets...", flush=True)
         # The Output widget is needed so that Javascript() dispatched from
         # the button callback has a display context capable of rendering
         # the application/javascript MIME type. Without it the JS is
@@ -346,26 +341,19 @@ class PipelineTracker:
             [self._buttons, self._html, self._js_out]
         )
 
-        print("PipelineTracker.__init__: registering kernel hooks...",
-              flush=True)
         self._register_hooks()
-        print("PipelineTracker.__init__: done", flush=True)
 
     # -- public API --------------------------------------------------------
 
     def show(self) -> None:
         """Render (or re-render) the progress card. Idempotent."""
-        print("PipelineTracker: discovering steps...", flush=True)
         self._discover()
-        print(f"PipelineTracker: {len(self._steps)} steps discovered "
-              f"from {self.notebook_path}", flush=True)
         self._render()
         if not self._displayed:
             display(widgets.HTML(_STYLESHEET))
             display(self._container)
             self._displayed = True
         self._write_state()
-        print("PipelineTracker: ready.", flush=True)
 
     @contextmanager
     def step(self, label: str):
@@ -652,12 +640,52 @@ class PipelineTracker:
 # In modern JupyterLab the application instance is only exposed on
 # ``window.jupyterapp`` when the admin sets
 # ``LabApp.expose_app_in_browser = True``. On managed JupyterHub
-# deployments that flag is usually off, so we also try a DOM fallback:
-# clicking the toolbar's "restart kernel and run all cells" button,
-# which is reachable without the app singleton.
+# deployments that flag is usually off, so we also try DOM fallbacks:
+# first currently-mounted buttons/menu items, then the top Run menu.
 _RUN_ALL_JS = """
 (async function () {
   function log(msg) { console.log('PipelineTracker:', msg); }
+
+    function sleep(ms) {
+        return new Promise(function (resolve) { setTimeout(resolve, ms); });
+    }
+
+    function clickElement(el) {
+        log('clicking target ' + el.tagName);
+        el.dispatchEvent(new MouseEvent('mousedown', {
+            bubbles: true,
+            cancelable: true,
+            view: window
+        }));
+        el.dispatchEvent(new MouseEvent('mouseup', {
+            bubbles: true,
+            cancelable: true,
+            view: window
+        }));
+        el.click();
+    }
+
+    function textOf(el) {
+        return (
+            (el.getAttribute('aria-label') || '') + ' ' +
+            (el.getAttribute('title') || '') + ' ' +
+            (el.textContent || '')
+        ).toLowerCase().replace(/\s+/g, ' ').trim();
+    }
+
+    function isTrackerButton(el) {
+        return Boolean(
+            el.closest('.pt-run-btn') || el.closest('.pt-run-btn-secondary')
+        );
+    }
+
+    function isUsableRunAllLabel(txt) {
+        if (!txt.includes('run all')) return false;
+        if (txt.includes('restart')) return false;
+        if (txt.includes('above') || txt.includes('below')) return false;
+        if (txt.includes('selected')) return false;
+        return true;
+    }
 
   function findByDataCommand() {
     const sels = [
@@ -668,7 +696,7 @@ _RUN_ALL_JS = """
     ];
     for (const sel of sels) {
       const el = document.querySelector(sel);
-      if (el) { log('matched ' + sel); return el; }
+            if (el && !isTrackerButton(el)) { log('matched ' + sel); return el; }
     }
     return null;
   }
@@ -680,25 +708,30 @@ _RUN_ALL_JS = """
     const all = document.querySelectorAll(
       'button, jp-button, [role="menuitem"], li.lm-Menu-item'
     );
-    let fallback = null;
     for (const el of all) {
       // Never match the tracker's own buttons (would self-trigger).
-      if (el.closest('.pt-run-btn') || el.closest('.pt-run-btn-secondary')) {
-        continue;
-      }
-      const txt = (
-        (el.getAttribute('aria-label') || '') + ' ' +
-        (el.getAttribute('title') || '') + ' ' +
-        (el.textContent || '')
-      ).toLowerCase();
-      if (!txt.includes('run all')) continue;
-      if (txt.includes('restart')) continue;          // skip "Restart & Run All"
-      if (txt.includes('above') || txt.includes('below') ||
-          txt.includes('selected')) continue;
+            if (isTrackerButton(el)) continue;
+            const txt = textOf(el);
+            if (!isUsableRunAllLabel(txt)) continue;
       log('matched by label: ' + txt.trim().slice(0, 80));
       return el;
     }
-    return fallback;
+        return null;
+    }
+
+    function findRunMenuBarItem() {
+        const items = document.querySelectorAll(
+            '.lm-MenuBar-item, .p-MenuBar-item, [role="menuitem"], li'
+        );
+        for (const el of items) {
+            const txt = textOf(el);
+            if (txt === 'run') return el;
+        }
+        for (const el of items) {
+            const txt = textOf(el);
+            if (txt.includes('run') && !txt.includes('running')) return el;
+        }
+        return null;
   }
 
   try {
@@ -716,16 +749,29 @@ _RUN_ALL_JS = """
     // 2. Toolbar/menu item via data-command.
     let target = findByDataCommand();
 
-    // 3. Walk DOM by label.
+        // 3. Walk currently mounted DOM by label.
     if (!target) target = findByLabel();
 
     if (target) {
-      log('clicking target ' + target.tagName);
-      target.click();
+            clickElement(target);
       return;
     }
 
-    // 4. Classic Notebook fallback.
+        // 4. JupyterLab mounts top-menu items only after the menu opens.
+        const runMenu = findRunMenuBarItem();
+        if (runMenu) {
+            log('opening Run menu');
+            clickElement(runMenu);
+            await sleep(250);
+
+            target = findByDataCommand() || findByLabel();
+            if (target) {
+                clickElement(target);
+                return;
+            }
+        }
+
+        // 5. Classic Notebook fallback.
     if (window.Jupyter && Jupyter.notebook) {
       log('using classic Jupyter.notebook');
       Jupyter.notebook.execute_all_cells();
@@ -734,7 +780,7 @@ _RUN_ALL_JS = """
 
     console.warn(
       'PipelineTracker: no Run-All target found. ' +
-      'Use Kernel \u2192 Restart & Run All from the menu, or ' +
+            'Use Run \u2192 Run All Cells from the menu, or ' +
       'the "Run All (kernel)" button as a last resort.'
     );
   } catch (e) {
