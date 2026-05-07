@@ -675,22 +675,26 @@ _RUN_ALL_JS = """
 
   function findByLabel() {
     // Walk every clickable element and look for "run all" in its
-    // aria-label, title, or text content.
+    // aria-label, title, or text content. Prefer plain "Run All Cells"
+    // and explicitly skip "Restart..." which opens a confirm dialog.
     const all = document.querySelectorAll(
       'button, jp-button, [role="menuitem"], li.lm-Menu-item'
     );
+    let fallback = null;
     for (const el of all) {
       const txt = (
         (el.getAttribute('aria-label') || '') + ' ' +
         (el.getAttribute('title') || '') + ' ' +
         (el.textContent || '')
       ).toLowerCase();
-      if (txt.includes('run all cells') || txt.includes('run all')) {
-        log('matched by label: ' + txt.trim().slice(0, 80));
-        return el;
-      }
+      if (!txt.includes('run all')) continue;
+      if (txt.includes('restart')) continue;          // skip "Restart & Run All"
+      if (txt.includes('above') || txt.includes('below') ||
+          txt.includes('selected')) continue;
+      log('matched by label: ' + txt.trim().slice(0, 80));
+      return el;
     }
-    return null;
+    return fallback;
   }
 
   try {
