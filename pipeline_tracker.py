@@ -325,7 +325,7 @@ class PipelineTracker:
         self._js_out = widgets.Output()
         self._run_btn = widgets.Button(
             description="Run All",
-            tooltip="Run every cell via the Jupyter frontend (preferred)",
+            tooltip="Execute every cell of the pipeline",
         )
         self._run_btn.add_class("pt-run-btn")
         self._run_btn.on_click(self._on_run_all_click)
@@ -682,6 +682,10 @@ _RUN_ALL_JS = """
     );
     let fallback = null;
     for (const el of all) {
+      // Never match the tracker's own buttons (would self-trigger).
+      if (el.closest('.pt-run-btn') || el.closest('.pt-run-btn-secondary')) {
+        continue;
+      }
       const txt = (
         (el.getAttribute('aria-label') || '') + ' ' +
         (el.getAttribute('title') || '') + ' ' +
