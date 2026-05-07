@@ -657,48 +657,77 @@ class PipelineTracker:
 # which is reachable without the app singleton.
 _RUN_ALL_JS = """
 (async function () {
-  function findToolbarButton() {
-    // JupyterLab toolbar items expose data-command on their button.
-    const selectors = [
-      'button[data-command="notebook:run-all-cells"]',
-      'button[data-command="runmenu:run-all"]',
-      'jp-button[data-command="notebook:run-all-cells"]',
-      'jp-button[data-command="runmenu:run-all"]',
+  function log(msg) { console.log('PipelineTracker:', msg); }
+
+  function findByDataCommand() {
+    const sels = [
+      '[data-command="notebook:run-all-cells"]',
+      '[data-command="runmenu:run-all"]',
+      '[data-jp-command-id="notebook:run-all-cells"]',
+      '[data-jp-command-id="runmenu:run-all"]',
     ];
-    for (const sel of selectors) {
+    for (const sel of sels) {
       const el = document.querySelector(sel);
-      if (el) return el;
+      if (el) { log('matched ' + sel); return el; }
+    }
+    return null;
+  }
+
+  function findByLabel() {
+    // Walk every clickable element and look for "run all" in its
+    // aria-label, title, or text content.
+    const all = document.querySelectorAll(
+      'button, jp-button, [role="menuitem"], li.lm-Menu-item'
+    );
+    for (const el of all) {
+      const txt = (
+        (el.getAttribute('aria-label') || '') + ' ' +
+        (el.getAttribute('title') || '') + ' ' +
+        (el.textContent || '')
+      ).toLowerCase();
+      if (txt.includes('run all cells') || txt.includes('run all')) {
+        log('matched by label: ' + txt.trim().slice(0, 80));
+        return el;
+      }
     }
     return null;
   }
 
   try {
-    // 1. Preferred: command registry on the LabApp singleton.
+    // 1. Lab app singleton (only when expose_app_in_browser=True).
     const app =
       window.jupyterapp ||
       window.jupyterlab ||
       (window._JUPYTERLAB && window._JUPYTERLAB.application);
     if (app && app.commands) {
+      log('using app.commands.execute');
       await app.commands.execute('notebook:run-all-cells');
       return;
     }
 
-    // 2. Fallback: click the toolbar button directly.
-    const btn = findToolbarButton();
-    if (btn) {
-      btn.click();
+    // 2. Toolbar/menu item via data-command.
+    let target = findByDataCommand();
+
+    // 3. Walk DOM by label.
+    if (!target) target = findByLabel();
+
+    if (target) {
+      log('clicking target ' + target.tagName);
+      target.click();
       return;
     }
 
-    // 3. Classic Notebook fallback.
+    // 4. Classic Notebook fallback.
     if (window.Jupyter && Jupyter.notebook) {
+      log('using classic Jupyter.notebook');
       Jupyter.notebook.execute_all_cells();
       return;
     }
 
     console.warn(
-      'PipelineTracker: no Jupyter frontend API found. ' +
-      'Use the "Run All (kernel)" button instead.'
+      'PipelineTracker: no Run-All target found. ' +
+      'Use Kernel \u2192 Restart & Run All from the menu, or ' +
+      'the "Run All (kernel)" button as a last resort.'
     );
   } catch (e) {
     console.error('PipelineTracker run-all failed:', e);
